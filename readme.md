@@ -8,9 +8,12 @@ The pipeline turns a video into a `.bvh` file in five steps:
 
 1. **Video preprocessing** — Converts the input video to `.mp4` if needed and reads its actual frame rate (via `ffmpeg`), so the exported animation plays back at the correct speed.
 2. **Human tracking & SMPL pose estimation** — Runs [4D-Humans](https://github.com/shubham-goel/4D-Humans) (`track.py`) on the video to detect and track every person in frame, estimating SMPL body pose parameters for each tracked person on every frame.
-3. **Track selection & pose conversion** — Automatically selects the most consistently tracked person (or a manually specified track ID), converts their SMPL rotation matrices to axis-angle representation, corrects the coordinate system, and repacks everything into the pose/translation format expected by `smpl2bvh`.
-4. **Pose smoothing** — Applies a median filter followed by a Savitzky-Golay filter (both from `scipy`) to the converted pose sequence to remove or reduce jitter before export.
-5. **BVH export** — Runs [smpl2bvh](https://github.com/KosukeFukazawa/smpl2bvh) to convert the smoothed SMPL pose sequence into a standard `.bvh` file at the video's original frame rate.
+3. **Track selection & coordinate conversion** — Automatically selects the most consistently tracked person (or a manually specified track ID), corrects the orientation/coordinate system, and extracts joint rotations and root translations.
+4. **Outlier clean-up & manifold-aware smoothing** — Processed directly during the PKL conversion:
+   * **Quaternion Sign-Flip Fix:** Ensures quaternion continuity across frames ($+q$ and $-q$ represent the same rotation).
+   * **Outlier Replacement:** Detects abrupt angular jumps per joint (using robust Z-scores on frame-to-frame distances) and interpolates bad frames via Slerp prior to smoothing.
+   * **Log-Space Motion Smoothing:** Smooths relative frame-to-frame rotations (angular velocity vectors in Lie algebra / log-space) using a Savitzky-Golay filter, preventing $SO(3)$ manifold distortion artifacts.
+5. **BVH export** — Converts the smoothed axis-angle sequence back into the format expected by [smpl2bvh](https://github.com/KosukeFukazawa/smpl2bvh) to produce a clean `.bvh` file at the video's original frame rate.
 
 ```mermaid
 flowchart TB
@@ -20,11 +23,12 @@ flowchart TB
     V0 --> V1 --> V2
 
     V2["4D-Humans:<br>tracking + SMPL pose estimation"]
-    V3["Track selection &<br>pose conversion"]
+    V3["Track selection &<br>coordinate conversion"]
 
-    subgraph S["Pose smoothing"]
+    subgraph S["In-line rotation filtering & smoothing"]
         direction TB
-        S1["scipy: Median filter"] --> S2["scipy: Savitzky-Golay filter"]
+        S1["Sign-Flip Fix<br>(Quaternion continuity)"] --> S2["Outlier Detection &<br>Slerp Interpolation"]
+        S2 --> S3["Log-Space Savitzky-Golay<br>Relative Motion Filter"]
     end
 
     V4["smpl2bvh:<br>BVH export"]
