@@ -7,6 +7,8 @@ import numpy as np
 import cv2
 import ffmpeg
 from scipy.spatial.transform import Rotation as R
+from scipy.signal import savgol_filter
+from scipy.ndimage import median_filter
 
 # ==========================================
 # CONFIGURATION
@@ -165,9 +167,79 @@ def convert_pkl_structure(input_pkl, output_pkl, target_tid=None):
     joblib.dump(out_data, output_pkl)
     print(f"Successfully exported {smpl_poses.shape[0]} frames to {output_pkl}.")
 
+def smooth_smpl_data(data, fps, polyorder=2):
+    """
+    Smooth SMPL poses and translations.
+
+    Args:
+        data (dict): Loaded PKL data.
+        fps (float): Video FPS.
+        polyorder (int): Savitzky-Golay polynomial order.
+
+    Returns:
+        dict: Smoothed data.
+    """
+    print(f"[Step 4] Smoothing SMPL Data...")
+
+    window = max(5, int(round(fps * 0.25)))
+    if window % 2 == 0:
+        window += 1
+
+    def valid_window(length):
+        w = min(window, length)
+        if w % 2 == 0:
+            w -= 1
+        return max(w, polyorder + 2)
+
+    if "smpl_poses" in data:
+        poses = data["smpl_poses"]
+
+        if len(poses) > polyorder + 2:
+            w = valid_window(len(poses))
+
+            poses = median_filter(poses, size=(3, 1))
+
+            root = savgol_filter(
+                poses[:, :3],
+                window_length=w,
+                polyorder=polyorder,
+                axis=0,
+                mode="interp"
+            )
+
+            body = savgol_filter(
+                poses[:, 3:],
+                window_length=w,
+                polyorder=polyorder,
+                axis=0,
+                mode="interp"
+            )
+
+            data["smpl_poses"] = np.concatenate([root, body], axis=1)
+
+    if "smpl_trans" in data:
+        trans = data["smpl_trans"]
+
+        if len(trans) > polyorder + 2:
+            w = valid_window(len(trans))
+
+            trans = median_filter(trans, size=(3, 1))
+
+            trans = savgol_filter(
+                trans,
+                window_length=w,
+                polyorder=polyorder,
+                axis=0,
+                mode="interp"
+            )
+
+            data["smpl_trans"] = trans
+
+    return data
+
 def run_smpl2bvh(converted_pkl, fps, gender, output_bvh):
     """Calls the smpl2bvh tool."""
-    print(f"[Step 4] Generating BVH file with {fps} FPS...")
+    print(f"[Step 5] Generating BVH file with {fps} FPS...")
     
     cmd = [
         "python", "smpl2bvh.py",
@@ -205,14 +277,21 @@ def main():
     temp_converted_pkl = "temp.pkl"
     convert_pkl_structure(raw_pkl, temp_converted_pkl, target_tid=args.tid)
 
-    # 5. Convert to BVH
+    # 5. Smooth SMPL Data
+    with open(temp_converted_pkl, "rb") as f:
+        smooth_data = joblib.load(f)
+
+    smooth_data = smooth_smpl_data(smooth_data, fps)
+
+    with open(temp_converted_pkl, "wb") as f:
+        joblib.dump(smooth_data, f)
+
+    # 6. Convert to BVH
     run_smpl2bvh(temp_converted_pkl, fps, args.gender, args.output)
 
     # Clean up (optional)
     if os.path.exists(temp_converted_pkl):
         os.remove(temp_converted_pkl)
-    if video_mp4 != args.video and os.path.exists(video_mp4):
-        os.remove(video_mp4)
 
 if __name__ == "__main__":
     main()
